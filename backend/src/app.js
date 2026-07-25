@@ -3,6 +3,7 @@ import cors from 'cors';
 import authRoutes from './routes/auth.js';
 import rehearsalRoutes from './routes/rehearsals.js';
 import absenceRoutes from './routes/absences.js';
+import gigRoutes from './routes/gigs.js';
 
 export function createApp() {
   const app = express();
@@ -17,6 +18,7 @@ export function createApp() {
   app.use('/api/auth', authRoutes);
   app.use('/api/rehearsals', rehearsalRoutes);
   app.use('/api/absences', absenceRoutes);
+  app.use('/api/gigs', gigRoutes);
 
   app.use((err, req, res, next) => {
     console.error(err);

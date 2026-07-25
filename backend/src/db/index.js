@@ -41,9 +41,32 @@ db.exec(`
     UNIQUE(user_id, rehearsal_id)
   );
 
+  CREATE TABLE IF NOT EXISTS gigs (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    date TEXT NOT NULL,  -- ISO date, e.g. 2026-08-01
+    time TEXT NOT NULL,  -- e.g. 18:30
+    venue TEXT NOT NULL,
+    created_by TEXT NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS gig_rsvps (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    gig_id TEXT NOT NULL REFERENCES gigs(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'declined')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, gig_id)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_rehearsals_date ON rehearsals(date);
   CREATE INDEX IF NOT EXISTS idx_absences_rehearsal ON absences(rehearsal_id);
   CREATE INDEX IF NOT EXISTS idx_absences_user ON absences(user_id);
+  CREATE INDEX IF NOT EXISTS idx_gigs_date ON gigs(date);
+  CREATE INDEX IF NOT EXISTS idx_gig_rsvps_gig ON gig_rsvps(gig_id);
+  CREATE INDEX IF NOT EXISTS idx_gig_rsvps_user ON gig_rsvps(user_id);
 `);
 
 export default db;
