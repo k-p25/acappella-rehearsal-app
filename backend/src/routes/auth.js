@@ -2,11 +2,21 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
+import rateLimit from 'express-rate-limit';
 import db from '../db/index.js';
 import { signToken, authenticate } from '../middleware/auth.js';
 import { ROLES } from '../constants/roles.js';
 
 const router = Router();
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Please try again later.' },
+  skip: () => process.env.NODE_ENV === 'test',
+});
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -16,7 +26,7 @@ const registerSchema = z.object({
   role: z.enum(ROLES, { message: 'A valid organization role is required' }),
 });
 
-router.post('/register', (req, res) => {
+router.post('/register', authLimiter, (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0].message });
@@ -45,7 +55,7 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
-router.post('/login', (req, res) => {
+router.post('/login', authLimiter, (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'Email and password are required' });

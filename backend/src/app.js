@@ -8,7 +8,8 @@ import gigRoutes from './routes/gigs.js';
 export function createApp() {
   const app = express();
 
-  app.use(cors());
+  const allowedOrigin = process.env.CORS_ORIGIN;
+  app.use(cors(allowedOrigin ? { origin: allowedOrigin } : {}));
   app.use(express.json());
 
   app.get('/api/health', (req, res) => {
