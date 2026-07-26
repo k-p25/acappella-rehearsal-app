@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import authRoutes from './routes/auth.js';
 import rehearsalRoutes from './routes/rehearsals.js';
-import absenceRoutes from './routes/absences.js';
+import attendanceRoutes from './routes/attendance.js';
 import gigRoutes from './routes/gigs.js';
 
 export function createApp() {
@@ -17,7 +17,7 @@ export function createApp() {
 
   app.use('/api/auth', authRoutes);
   app.use('/api/rehearsals', rehearsalRoutes);
-  app.use('/api/absences', absenceRoutes);
+  app.use('/api/attendance', attendanceRoutes);
   app.use('/api/gigs', gigRoutes);
 
   app.use((err, req, res, next) => {

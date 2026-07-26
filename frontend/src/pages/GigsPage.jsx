@@ -3,6 +3,7 @@ import api from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import Navbar from '../components/Navbar';
 import GigCard from '../components/GigCard';
+import { canManageGigs } from '../utils/permissions';
 
 export default function GigsPage() {
   const { user } = useAuth();
@@ -14,6 +15,7 @@ export default function GigsPage() {
   const [title, setTitle] = useState('');
   const [date, setDate] = useState('');
   const [time, setTime] = useState('');
+  const [endTime, setEndTime] = useState('');
   const [venue, setVenue] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -33,8 +35,8 @@ export default function GigsPage() {
     setError('');
     setSubmitting(true);
     try {
-      await api.post('/gigs', { title, date, time, venue });
-      setTitle(''); setDate(''); setTime(''); setVenue('');
+      await api.post('/gigs', { title, date, time, endTime: endTime || undefined, venue });
+      setTitle(''); setDate(''); setTime(''); setEndTime(''); setVenue('');
       setShowForm(false);
       loadGigs();
     } catch (err) {
@@ -50,7 +52,7 @@ export default function GigsPage() {
       <main className="max-w-3xl mx-auto px-4 py-8">
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-xl font-semibold text-slate-900">Gigs</h1>
-          {user?.role === 'admin' && (
+          {canManageGigs(user) && (
             <button
               onClick={() => setShowForm(!showForm)}
               className="text-sm bg-indigo-600 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-700 transition"
@@ -68,15 +70,20 @@ export default function GigsPage() {
                 placeholder="e.g. Fall Showcase"
                 className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">Date</label>
                 <input type="date" required value={date} onChange={(e) => setDate(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Time</label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Start time</label>
                 <input type="time" required value={time} onChange={(e) => setTime(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">End time</label>
+                <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
               </div>
             </div>
@@ -101,7 +108,7 @@ export default function GigsPage() {
         ) : (
           <div className="space-y-3">
             {gigs.map((g) => (
-              <GigCard key={g.id} gig={g} onRsvpChange={loadGigs} />
+              <GigCard key={g.id} gig={g} />
             ))}
           </div>
         )}

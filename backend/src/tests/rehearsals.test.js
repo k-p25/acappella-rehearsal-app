@@ -15,7 +15,7 @@ const request = (await import('supertest')).default;
 const app = createApp();
 
 beforeEach(() => {
-  db.exec('DELETE FROM absences; DELETE FROM rehearsals; DELETE FROM users;');
+  db.exec('DELETE FROM attendance_records; DELETE FROM rehearsals; DELETE FROM users;');
 });
 
 after(() => {
@@ -25,23 +25,22 @@ after(() => {
   }
 });
 
-async function registerAdmin() {
+async function registerDirector() {
   const res = await request(app)
     .post('/api/auth/register')
-    .send({ email: 'admin@group.com', password: 'password123', name: 'Admin' });
+    .send({ email: 'director@group.com', password: 'password123', name: 'Director', role: 'music_director' });
   return res.body.token;
 }
 
 async function registerMember(email = 'member@group.com') {
-  await registerAdmin(); // ensures admin exists first so this user becomes a member
   const res = await request(app)
     .post('/api/auth/register')
-    .send({ email, password: 'password123', name: 'Member' });
+    .send({ email, password: 'password123', name: 'Member', role: 'member' });
   return res.body.token;
 }
 
-test('admin can create a rehearsal', async () => {
-  const token = await registerAdmin();
+test('music director can create a rehearsal', async () => {
+  const token = await registerDirector();
 
   const res = await request(app)
     .post('/api/rehearsals')
@@ -49,7 +48,8 @@ test('admin can create a rehearsal', async () => {
     .send({ date: '2026-08-01', startTime: '18:30', location: 'Choir Room 2' });
 
   assert.equal(res.status, 201);
-  assert.equal(res.body.rehearsal.location, 'Choir Room 2');
+  assert.equal(res.body.rehearsals.length, 1);
+  assert.equal(res.body.rehearsals[0].location, 'Choir Room 2');
 });
 
 test('member cannot create a rehearsal', async () => {
@@ -64,7 +64,7 @@ test('member cannot create a rehearsal', async () => {
 });
 
 test('rehearsal creation rejects invalid date format', async () => {
-  const token = await registerAdmin();
+  const token = await registerDirector();
 
   const res = await request(app)
     .post('/api/rehearsals')
@@ -75,7 +75,7 @@ test('rehearsal creation rejects invalid date format', async () => {
 });
 
 test('GET /api/rehearsals lists rehearsals in date order', async () => {
-  const token = await registerAdmin();
+  const token = await registerDirector();
 
   await request(app).post('/api/rehearsals').set('Authorization', `Bearer ${token}`)
     .send({ date: '2026-08-15', startTime: '18:00', location: 'Room A' });
@@ -89,13 +89,116 @@ test('GET /api/rehearsals lists rehearsals in date order', async () => {
   assert.equal(res.body.rehearsals[0].date, '2026-08-01'); // earliest first
 });
 
-test('admin can delete a rehearsal', async () => {
-  const token = await registerAdmin();
+test('music director can delete a rehearsal', async () => {
+  const token = await registerDirector();
   const created = await request(app).post('/api/rehearsals').set('Authorization', `Bearer ${token}`)
     .send({ date: '2026-08-01', startTime: '18:00', location: 'Room A' });
 
   const res = await request(app)
-    .delete(`/api/rehearsals/${created.body.rehearsal.id}`)
+    .delete(`/api/rehearsals/${created.body.rehearsals[0].id}`)
+    .set('Authorization', `Bearer ${token}`);
+
+  assert.equal(res.status, 204);
+
+  const list = await request(app).get('/api/rehearsals').set('Authorization', `Bearer ${token}`);
+  assert.equal(list.body.rehearsals.length, 0);
+});
+
+test('creating a rehearsal pre-creates a pending attendance record for every member', async () => {
+  const directorToken = await registerDirector();
+  const memberToken = await registerMember();
+
+  const created = await request(app).post('/api/rehearsals').set('Authorization', `Bearer ${directorToken}`)
+    .send({ date: '2026-08-01', startTime: '18:00', location: 'Room A' });
+  const rehearsalId = created.body.rehearsals[0].id;
+
+  const detail = await request(app)
+    .get(`/api/rehearsals/${rehearsalId}`)
+    .set('Authorization', `Bearer ${memberToken}`);
+
+  assert.equal(detail.body.attendance.length, 2);
+  assert.ok(detail.body.attendance.every((a) => a.status === 'pending'));
+});
+
+test('recurring rehearsal with an occurrence count generates the correct number of instances', async () => {
+  const token = await registerDirector();
+
+  // 2026-08-03 is a Monday; requesting Mon/Wed for 4 occurrences should yield 4 rehearsals.
+  const res = await request(app)
+    .post('/api/rehearsals')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      date: '2026-08-03',
+      startTime: '18:30',
+      location: 'Choir Room 2',
+      recurrence: { daysOfWeek: [1, 3], occurrences: 4 },
+    });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.rehearsals.length, 4);
+  const recurrenceIds = new Set(res.body.rehearsals.map((r) => r.recurrence_id));
+  assert.equal(recurrenceIds.size, 1);
+  assert.ok([...recurrenceIds][0]);
+});
+
+test('recurring rehearsal with an until date stops generating past that date', async () => {
+  const token = await registerDirector();
+
+  // Every Monday from 2026-08-03 until 2026-08-17 (inclusive) -> 3 Mondays.
+  const res = await request(app)
+    .post('/api/rehearsals')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      date: '2026-08-03',
+      startTime: '18:30',
+      location: 'Choir Room 2',
+      recurrence: { daysOfWeek: [1], until: '2026-08-17' },
+    });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.rehearsals.length, 3);
+});
+
+test('PUT with ?scope=series updates every rehearsal in the recurring series', async () => {
+  const token = await registerDirector();
+
+  const created = await request(app)
+    .post('/api/rehearsals')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      date: '2026-08-03',
+      startTime: '18:30',
+      location: 'Choir Room 2',
+      recurrence: { daysOfWeek: [1], occurrences: 3 },
+    });
+  const firstId = created.body.rehearsals[0].id;
+
+  const res = await request(app)
+    .put(`/api/rehearsals/${firstId}?scope=series`)
+    .set('Authorization', `Bearer ${token}`)
+    .send({ location: 'New Room' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.rehearsals.length, 3);
+  assert.ok(res.body.rehearsals.every((r) => r.location === 'New Room'));
+});
+
+test('DELETE with ?scope=series removes every rehearsal in the recurring series', async () => {
+  const token = await registerDirector();
+
+  const created = await request(app)
+    .post('/api/rehearsals')
+    .set('Authorization', `Bearer ${token}`)
+    .send({
+      date: '2026-08-03',
+      startTime: '18:30',
+      location: 'Choir Room 2',
+      recurrence: { daysOfWeek: [1], occurrences: 3 },
+    });
+  const firstId = created.body.rehearsals[0].id;
+
+  const res = await request(app)
+    .delete(`/api/rehearsals/${firstId}?scope=series`)
     .set('Authorization', `Bearer ${token}`);
 
   assert.equal(res.status, 204);

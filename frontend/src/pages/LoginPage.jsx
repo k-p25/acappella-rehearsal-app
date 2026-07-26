@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { ROLES } from '../utils/roles';
 
 const VOICE_PARTS = ['Soprano', 'Alto', 'Tenor', 'Bass'];
 
@@ -10,6 +11,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [voicePart, setVoicePart] = useState('');
+  const [role, setRole] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -24,7 +26,7 @@ export default function LoginPage() {
       if (mode === 'login') {
         await login(email, password);
       } else {
-        await register(email, password, name, voicePart);
+        await register(email, password, name, voicePart, role);
       }
       navigate('/');
     } catch (err) {
@@ -80,6 +82,23 @@ export default function LoginPage() {
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
+
+          {mode === 'register' && (
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Role</label>
+              <select
+                required
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="">Select...</option>
+                {ROLES.map((r) => (
+                  <option key={r.value} value={r.value}>{r.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {mode === 'register' && (
             <div>

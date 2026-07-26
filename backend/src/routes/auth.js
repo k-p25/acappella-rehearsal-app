@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import db from '../db/index.js';
 import { signToken, authenticate } from '../middleware/auth.js';
+import { ROLES } from '../constants/roles.js';
 
 const router = Router();
 
@@ -12,8 +13,7 @@ const registerSchema = z.object({
   password: z.string().min(8, 'Password must be at least 8 characters'),
   name: z.string().min(1),
   voicePart: z.string().optional(),
-  // First user to register becomes admin automatically; otherwise members
-  // must be granted admin by an existing admin.
+  role: z.enum(ROLES, { message: 'A valid organization role is required' }),
 });
 
 router.post('/register', (req, res) => {
@@ -21,15 +21,12 @@ router.post('/register', (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0].message });
   }
-  const { email, password, name, voicePart } = parsed.data;
+  const { email, password, name, voicePart, role } = parsed.data;
 
   const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
   if (existing) {
     return res.status(409).json({ error: 'An account with this email already exists' });
   }
-
-  const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-  const role = userCount === 0 ? 'admin' : 'member'; // bootstrap: first user is admin
 
   const id = randomUUID();
   const passwordHash = bcrypt.hashSync(password, 10);

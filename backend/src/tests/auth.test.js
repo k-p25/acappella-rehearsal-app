@@ -17,7 +17,7 @@ const request = (await import('supertest')).default;
 const app = createApp();
 
 beforeEach(() => {
-  db.exec('DELETE FROM absences; DELETE FROM rehearsals; DELETE FROM users;');
+  db.exec('DELETE FROM attendance_records; DELETE FROM rehearsals; DELETE FROM users;');
 });
 
 after(() => {
@@ -27,37 +27,40 @@ after(() => {
   }
 });
 
-test('POST /api/auth/register creates the first user as admin', async () => {
+test('POST /api/auth/register requires a valid organization role', async () => {
   const res = await request(app)
     .post('/api/auth/register')
     .send({ email: 'director@group.com', password: 'password123', name: 'Director' });
 
+  assert.equal(res.status, 400);
+});
+
+test('POST /api/auth/register creates a user with the selected role', async () => {
+  const res = await request(app)
+    .post('/api/auth/register')
+    .send({ email: 'director@group.com', password: 'password123', name: 'Director', role: 'music_director' });
+
   assert.equal(res.status, 201);
-  assert.equal(res.body.user.role, 'admin');
+  assert.equal(res.body.user.role, 'music_director');
   assert.ok(res.body.token);
 });
 
-test('POST /api/auth/register creates subsequent users as members', async () => {
-  await request(app)
-    .post('/api/auth/register')
-    .send({ email: 'director@group.com', password: 'password123', name: 'Director' });
-
+test('POST /api/auth/register rejects an invalid role', async () => {
   const res = await request(app)
     .post('/api/auth/register')
-    .send({ email: 'member@group.com', password: 'password123', name: 'Member' });
+    .send({ email: 'bad@group.com', password: 'password123', name: 'Bad', role: 'admin' });
 
-  assert.equal(res.status, 201);
-  assert.equal(res.body.user.role, 'member');
+  assert.equal(res.status, 400);
 });
 
 test('POST /api/auth/register rejects duplicate emails', async () => {
   await request(app)
     .post('/api/auth/register')
-    .send({ email: 'dupe@group.com', password: 'password123', name: 'First' });
+    .send({ email: 'dupe@group.com', password: 'password123', name: 'First', role: 'member' });
 
   const res = await request(app)
     .post('/api/auth/register')
-    .send({ email: 'dupe@group.com', password: 'password123', name: 'Second' });
+    .send({ email: 'dupe@group.com', password: 'password123', name: 'Second', role: 'member' });
 
   assert.equal(res.status, 409);
 });
@@ -65,7 +68,7 @@ test('POST /api/auth/register rejects duplicate emails', async () => {
 test('POST /api/auth/register rejects short passwords', async () => {
   const res = await request(app)
     .post('/api/auth/register')
-    .send({ email: 'short@group.com', password: 'abc', name: 'Short' });
+    .send({ email: 'short@group.com', password: 'abc', name: 'Short', role: 'member' });
 
   assert.equal(res.status, 400);
 });
@@ -73,7 +76,7 @@ test('POST /api/auth/register rejects short passwords', async () => {
 test('POST /api/auth/login succeeds with correct credentials', async () => {
   await request(app)
     .post('/api/auth/register')
-    .send({ email: 'login@group.com', password: 'password123', name: 'Login Test' });
+    .send({ email: 'login@group.com', password: 'password123', name: 'Login Test', role: 'member' });
 
   const res = await request(app)
     .post('/api/auth/login')
@@ -86,7 +89,7 @@ test('POST /api/auth/login succeeds with correct credentials', async () => {
 test('POST /api/auth/login rejects wrong password', async () => {
   await request(app)
     .post('/api/auth/register')
-    .send({ email: 'wrongpw@group.com', password: 'password123', name: 'Test' });
+    .send({ email: 'wrongpw@group.com', password: 'password123', name: 'Test', role: 'member' });
 
   const res = await request(app)
     .post('/api/auth/login')

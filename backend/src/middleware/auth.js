@@ -25,9 +25,13 @@ export function authenticate(req, res, next) {
   }
 }
 
-export function requireAdmin(req, res, next) {
-  if (req.user?.role !== 'admin') {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-  next();
+export function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user?.role)) {
+      return res.status(403).json({ error: 'You do not have permission to perform this action' });
+    }
+    next();
+  };
 }
+
+export const requireMusicDirector = requireRole('music_director');

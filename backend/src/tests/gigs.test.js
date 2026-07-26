@@ -15,7 +15,7 @@ const request = (await import('supertest')).default;
 const app = createApp();
 
 beforeEach(() => {
-  db.exec('DELETE FROM gig_rsvps; DELETE FROM gigs; DELETE FROM absences; DELETE FROM rehearsals; DELETE FROM users;');
+  db.exec('DELETE FROM gig_rsvps; DELETE FROM gigs; DELETE FROM attendance_records; DELETE FROM rehearsals; DELETE FROM users;');
 });
 
 after(() => {
@@ -25,37 +25,28 @@ after(() => {
   }
 });
 
-async function registerAdmin() {
+async function registerDirector() {
   const res = await request(app)
     .post('/api/auth/register')
-    .send({ email: 'admin@group.com', password: 'password123', name: 'Admin' });
+    .send({ email: 'director@group.com', password: 'password123', name: 'Director', role: 'music_director' });
   return res.body.token;
 }
 
 async function registerMember(email = 'member@group.com') {
-  await registerAdmin(); // ensures admin exists first so this user becomes a member
   const res = await request(app)
     .post('/api/auth/register')
-    .send({ email, password: 'password123', name: 'Member' });
+    .send({ email, password: 'password123', name: 'Member', role: 'member' });
   return res.body.token;
 }
 
 async function setup() {
-  const adminRes = await request(app)
-    .post('/api/auth/register')
-    .send({ email: 'admin@group.com', password: 'password123', name: 'Admin' });
-  const adminToken = adminRes.body.token;
-
-  const memberRes = await request(app)
-    .post('/api/auth/register')
-    .send({ email: 'member@group.com', password: 'password123', name: 'Member' });
-  const memberToken = memberRes.body.token;
-
-  return { adminToken, memberToken };
+  const directorToken = await registerDirector();
+  const memberToken = await registerMember();
+  return { directorToken, memberToken };
 }
 
-test('admin can create a gig', async () => {
-  const token = await registerAdmin();
+test('music director can create a gig', async () => {
+  const token = await registerDirector();
 
   const res = await request(app)
     .post('/api/gigs')
@@ -78,7 +69,7 @@ test('member cannot create a gig', async () => {
 });
 
 test('gig creation rejects invalid date format', async () => {
-  const token = await registerAdmin();
+  const token = await registerDirector();
 
   const res = await request(app)
     .post('/api/gigs')
@@ -88,18 +79,30 @@ test('gig creation rejects invalid date format', async () => {
   assert.equal(res.status, 400);
 });
 
+test('gig creation accepts an optional end time', async () => {
+  const token = await registerDirector();
+
+  const res = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ title: 'Fall Showcase', date: '2026-09-12', time: '19:00', endTime: '21:00', venue: 'Main Hall' });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.gig.end_time, '21:00');
+});
+
 test('creating a gig auto-creates pending RSVPs for every existing member', async () => {
-  const { adminToken, memberToken } = await setup();
+  const { directorToken, memberToken } = await setup();
 
   const created = await request(app)
     .post('/api/gigs')
-    .set('Authorization', `Bearer ${adminToken}`)
+    .set('Authorization', `Bearer ${directorToken}`)
     .send({ title: 'Fall Showcase', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
   const gigId = created.body.gig.id;
 
   const detail = await request(app)
     .get(`/api/gigs/${gigId}`)
-    .set('Authorization', `Bearer ${adminToken}`);
+    .set('Authorization', `Bearer ${directorToken}`);
 
   assert.equal(detail.body.rsvps.length, 2);
   assert.ok(detail.body.rsvps.every((r) => r.status === 'pending'));
@@ -111,7 +114,7 @@ test('creating a gig auto-creates pending RSVPs for every existing member', asyn
 });
 
 test('GET /api/gigs lists gigs in date order with my_rsvp_status attached', async () => {
-  const token = await registerAdmin();
+  const token = await registerDirector();
 
   await request(app).post('/api/gigs').set('Authorization', `Bearer ${token}`)
     .send({ title: 'Later Gig', date: '2026-09-20', time: '19:00', venue: 'Venue A' });
@@ -127,11 +130,11 @@ test('GET /api/gigs lists gigs in date order with my_rsvp_status attached', asyn
 });
 
 test('member can update their own RSVP to accepted', async () => {
-  const { adminToken, memberToken } = await setup();
+  const { directorToken, memberToken } = await setup();
 
   const created = await request(app)
     .post('/api/gigs')
-    .set('Authorization', `Bearer ${adminToken}`)
+    .set('Authorization', `Bearer ${directorToken}`)
     .send({ title: 'Fall Showcase', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
   const gigId = created.body.gig.id;
 
@@ -145,35 +148,35 @@ test('member can update their own RSVP to accepted', async () => {
 
   const detail = await request(app)
     .get(`/api/gigs/${gigId}`)
-    .set('Authorization', `Bearer ${adminToken}`);
+    .set('Authorization', `Bearer ${directorToken}`);
   const memberRsvp = detail.body.rsvps.find((r) => r.name === 'Member');
   assert.equal(memberRsvp.status, 'accepted');
 });
 
 test('member can update their own RSVP to declined', async () => {
-  const { adminToken, memberToken } = await setup();
+  const { directorToken, memberToken } = await setup();
 
   const created = await request(app)
     .post('/api/gigs')
-    .set('Authorization', `Bearer ${adminToken}`)
+    .set('Authorization', `Bearer ${directorToken}`)
     .send({ title: 'Fall Showcase', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
   const gigId = created.body.gig.id;
 
   const res = await request(app)
     .put(`/api/gigs/${gigId}/rsvp`)
     .set('Authorization', `Bearer ${memberToken}`)
-    .send({ status: 'declined' });
+    .send({ status: 'declined', declineReason: 'Busy' });
 
   assert.equal(res.status, 200);
   assert.equal(res.body.rsvp.status, 'declined');
 });
 
 test('RSVP rejects a "pending" status update — not settable via this route', async () => {
-  const { adminToken, memberToken } = await setup();
+  const { directorToken, memberToken } = await setup();
 
   const created = await request(app)
     .post('/api/gigs')
-    .set('Authorization', `Bearer ${adminToken}`)
+    .set('Authorization', `Bearer ${directorToken}`)
     .send({ title: 'Fall Showcase', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
   const gigId = created.body.gig.id;
 
@@ -196,8 +199,8 @@ test('RSVP for nonexistent gig returns 404', async () => {
   assert.equal(res.status, 404);
 });
 
-test('admin can delete a gig', async () => {
-  const token = await registerAdmin();
+test('music director can delete a gig', async () => {
+  const token = await registerDirector();
   const created = await request(app).post('/api/gigs').set('Authorization', `Bearer ${token}`)
     .send({ title: 'Fall Showcase', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
 
@@ -212,13 +215,189 @@ test('admin can delete a gig', async () => {
 });
 
 test('member cannot delete a gig', async () => {
-  const { adminToken, memberToken } = await setup();
-  const created = await request(app).post('/api/gigs').set('Authorization', `Bearer ${adminToken}`)
+  const { directorToken, memberToken } = await setup();
+  const created = await request(app).post('/api/gigs').set('Authorization', `Bearer ${directorToken}`)
     .send({ title: 'Fall Showcase', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
 
   const res = await request(app)
     .delete(`/api/gigs/${created.body.gig.id}`)
     .set('Authorization', `Bearer ${memberToken}`);
+
+  assert.equal(res.status, 403);
+});
+
+test('president can create a gig', async () => {
+  const presidentRes = await request(app)
+    .post('/api/auth/register')
+    .send({ email: 'president@group.com', password: 'password123', name: 'President', role: 'president' });
+  const token = presidentRes.body.token;
+
+  const res = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ title: 'Concert', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
+
+  assert.equal(res.status, 201);
+  assert.equal(res.body.gig.title, 'Concert');
+});
+
+test('business manager can create a gig', async () => {
+  const bmRes = await request(app)
+    .post('/api/auth/register')
+    .send({ email: 'bm@group.com', password: 'password123', name: 'Business Manager', role: 'business_manager' });
+  const token = bmRes.body.token;
+
+  const res = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ title: 'Concert', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
+
+  assert.equal(res.status, 201);
+});
+
+test('declining a gig requires a reason', async () => {
+  const { directorToken, memberToken } = await setup();
+
+  const gigRes = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${directorToken}`)
+    .send({ title: 'Concert', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
+
+  const res = await request(app)
+    .put(`/api/gigs/${gigRes.body.gig.id}/rsvp`)
+    .set('Authorization', `Bearer ${memberToken}`)
+    .send({ status: 'declined' });
+
+  assert.equal(res.status, 400);
+  assert(res.body.error.includes('reason'));
+});
+
+test('member can decline with a reason', async () => {
+  const { directorToken, memberToken } = await setup();
+
+  const gigRes = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${directorToken}`)
+    .send({ title: 'Concert', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
+
+  const res = await request(app)
+    .put(`/api/gigs/${gigRes.body.gig.id}/rsvp`)
+    .set('Authorization', `Bearer ${memberToken}`)
+    .send({ status: 'declined', declineReason: 'Out of town' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.rsvp.declineReason, 'Out of town');
+});
+
+test('decline reason is visible to music director', async () => {
+  const { directorToken, memberToken } = await setup();
+
+  const gigRes = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${directorToken}`)
+    .send({ title: 'Concert', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
+
+  await request(app)
+    .put(`/api/gigs/${gigRes.body.gig.id}/rsvp`)
+    .set('Authorization', `Bearer ${memberToken}`)
+    .send({ status: 'declined', declineReason: 'Sick' });
+
+  const res = await request(app)
+    .get(`/api/gigs/${gigRes.body.gig.id}`)
+    .set('Authorization', `Bearer ${directorToken}`);
+
+  const memberRsvp = res.body.rsvps.find((r) => r.name === 'Member');
+  assert.equal(memberRsvp.decline_reason, 'Sick');
+});
+
+test('decline reason is visible to president', async () => {
+  const { directorToken, memberToken } = await setup();
+  const presidentRes = await request(app)
+    .post('/api/auth/register')
+    .send({ email: 'president@group.com', password: 'password123', name: 'President', role: 'president' });
+  const presidentToken = presidentRes.body.token;
+  const gigRes = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${directorToken}`)
+    .send({ title: 'Concert', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
+
+  await request(app)
+    .put(`/api/gigs/${gigRes.body.gig.id}/rsvp`)
+    .set('Authorization', `Bearer ${memberToken}`)
+    .send({ status: 'declined', declineReason: 'Conflict' });
+
+  const res = await request(app)
+    .get(`/api/gigs/${gigRes.body.gig.id}`)
+    .set('Authorization', `Bearer ${presidentToken}`);
+
+  const memberRsvps = res.body.rsvps.filter((r) => r.name === 'Member');
+  const memberRsvp = memberRsvps.length > 0 ? memberRsvps[0] : null;
+  assert(memberRsvp, 'Member RSVP should exist');
+  assert.equal(memberRsvp.decline_reason, 'Conflict');
+});
+
+test('decline reason is hidden from other members', async () => {
+  const member1Res = await request(app)
+    .post('/api/auth/register')
+    .send({ email: 'member1@group.com', password: 'password123', name: 'Member 1', role: 'member' });
+  const member1Token = member1Res.body.token;
+
+  const member2Res = await request(app)
+    .post('/api/auth/register')
+    .send({ email: 'member2@group.com', password: 'password123', name: 'Member 2', role: 'member' });
+  const member2Token = member2Res.body.token;
+
+  const directorToken = await registerDirector();
+  const gigRes = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${directorToken}`)
+    .send({ title: 'Concert', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
+
+  await request(app)
+    .put(`/api/gigs/${gigRes.body.gig.id}/rsvp`)
+    .set('Authorization', `Bearer ${member1Token}`)
+    .send({ status: 'declined', declineReason: 'Secret reason' });
+
+  const res = await request(app)
+    .get(`/api/gigs/${gigRes.body.gig.id}`)
+    .set('Authorization', `Bearer ${member2Token}`);
+
+  const member1Rsvp = res.body.rsvps.find((r) => r.name === 'Member 1');
+  assert.equal(member1Rsvp.decline_reason, null);
+});
+
+test('president can edit a gig', async () => {
+  const presidentRes = await request(app)
+    .post('/api/auth/register')
+    .send({ email: 'president@group.com', password: 'password123', name: 'President', role: 'president' });
+  const presidentToken = presidentRes.body.token;
+
+  const gigRes = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${presidentToken}`)
+    .send({ title: 'Concert', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
+
+  const res = await request(app)
+    .put(`/api/gigs/${gigRes.body.gig.id}`)
+    .set('Authorization', `Bearer ${presidentToken}`)
+    .send({ title: 'Updated Concert' });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.gig.title, 'Updated Concert');
+});
+
+test('member cannot edit a gig', async () => {
+  const { memberToken, directorToken } = await setup();
+
+  const gigRes = await request(app)
+    .post('/api/gigs')
+    .set('Authorization', `Bearer ${directorToken}`)
+    .send({ title: 'Concert', date: '2026-09-12', time: '19:00', venue: 'Main Hall' });
+
+  const res = await request(app)
+    .put(`/api/gigs/${gigRes.body.gig.id}`)
+    .set('Authorization', `Bearer ${memberToken}`)
+    .send({ title: 'Hacked' });
 
   assert.equal(res.status, 403);
 });

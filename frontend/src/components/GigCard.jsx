@@ -1,6 +1,4 @@
-import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import api from '../api/client';
 import { formatShortDate, formatTime } from '../utils/date';
 
 const STATUS_STYLES = {
@@ -15,24 +13,13 @@ const STATUS_LABELS = {
   pending: 'Pending',
 };
 
-export default function GigCard({ gig, onRsvpChange }) {
-  const [busy, setBusy] = useState(false);
+export default function GigCard({ gig }) {
   const status = gig.my_rsvp_status || 'pending';
-
-  async function respond(newStatus) {
-    setBusy(true);
-    try {
-      await api.put(`/gigs/${gig.id}/rsvp`, { status: newStatus });
-      onRsvpChange?.();
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 p-4 hover:border-indigo-300 hover:shadow-sm transition">
       <div className="flex items-start justify-between gap-4">
-        <Link to={`/gigs/${gig.id}`} className="min-w-0">
+        <Link to={`/gigs/${gig.id}`} className="min-w-0 flex-1">
           <p className="font-medium text-slate-900">{gig.title}</p>
           <p className="text-sm text-slate-500 mt-0.5">
             {formatShortDate(gig.date)} · {formatTime(gig.time)}
@@ -44,22 +31,11 @@ export default function GigCard({ gig, onRsvpChange }) {
         </span>
       </div>
 
-      <div className="flex gap-2 mt-3">
-        <button
-          onClick={() => respond('accepted')}
-          disabled={busy || status === 'accepted'}
-          className="text-sm bg-emerald-600 text-white px-3 py-1.5 rounded-lg hover:bg-emerald-700 disabled:opacity-40 transition"
-        >
-          Accept
+      <Link to={`/gigs/${gig.id}`} className="inline-block mt-3">
+        <button className="text-sm bg-indigo-600 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-700 transition">
+          Change status
         </button>
-        <button
-          onClick={() => respond('declined')}
-          disabled={busy || status === 'declined'}
-          className="text-sm border border-slate-300 text-slate-700 px-3 py-1.5 rounded-lg hover:bg-slate-50 disabled:opacity-40 transition"
-        >
-          Decline
-        </button>
-      </div>
+      </Link>
     </div>
   );
 }

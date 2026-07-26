@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { roleLabel } from '../utils/roles';
 
 const TABS = [
   { to: '/', label: 'Home', end: true },
@@ -37,7 +38,7 @@ export default function Navbar() {
           </div>
         </div>
         <div className="flex items-center gap-4 text-sm">
-          <span className="text-slate-500">{user?.name} {user?.role === 'admin' && '(admin)'}</span>
+          <span className="text-slate-500">{user?.name} {user?.role && `(${roleLabel(user.role)})`}</span>
           <button onClick={logout} className="text-slate-500 hover:text-slate-900 transition">
             Sign out
           </button>
