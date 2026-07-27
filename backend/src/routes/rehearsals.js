@@ -1,74 +1,95 @@
 import { Router } from 'express';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
-import db from '../db/index.js';
+import { query, withTransaction } from '../db/index.js';
 import { authenticate, requireMusicDirector } from '../middleware/auth.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 
 const router = Router();
 router.use(authenticate);
 
 // GET /rehearsals - list all rehearsals with attendance counts, optionally filtered by date range
-router.get('/', (req, res) => {
-  const { from, to } = req.query;
+router.get(
+  '/',
+  asyncHandler(async (req, res) => {
+    const { from, to } = req.query;
 
-  let query = `
+    // COUNT is cast to int so it serializes as a number; Postgres bigint would come back as a string.
+    let sql = `
     SELECT r.*,
-      (SELECT COUNT(*) FROM attendance_records a WHERE a.rehearsal_id = r.id AND a.status IN ('absent_full', 'absent_partial') AND a.approval_status != 'denied') as absence_count
+      (SELECT COUNT(*)::int FROM attendance_records a WHERE a.rehearsal_id = r.id AND a.status IN ('absent_full', 'absent_partial') AND a.approval_status != 'denied') as absence_count
     FROM rehearsals r
   `;
-  const conditions = [];
-  const params = [];
+    const conditions = [];
+    const params = [];
 
-  if (from) {
-    conditions.push('r.date >= ?');
-    params.push(from);
-  }
-  if (to) {
-    conditions.push('r.date <= ?');
-    params.push(to);
-  }
-  if (conditions.length) {
-    query += ' WHERE ' + conditions.join(' AND ');
-  }
-  query += ' ORDER BY r.date ASC, r.start_time ASC';
+    if (from) {
+      params.push(from);
+      conditions.push(`r.date >= $${params.length}`);
+    }
+    if (to) {
+      params.push(to);
+      conditions.push(`r.date <= $${params.length}`);
+    }
+    if (conditions.length) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+    sql += ' ORDER BY r.date ASC, r.start_time ASC';
 
-  const rehearsals = db.prepare(query).all(...params);
+    const { rows: rehearsals } = await query(sql, params);
 
-  // Attach the current user's own attendance record for each
-  const attendanceStmt = db.prepare(
-    'SELECT id, status, approval_status, reason FROM attendance_records WHERE rehearsal_id = ? AND user_id = ?'
-  );
-  const enriched = rehearsals.map((r) => {
-    const myAttendance = attendanceStmt.get(r.id, req.user.id);
-    return { ...r, my_attendance: myAttendance || null };
-  });
+    // Attach the current user's own attendance record for each, in a single round trip.
+    const ids = rehearsals.map((r) => r.id);
+    const mine = ids.length
+      ? (
+          await query(
+            `SELECT rehearsal_id, id, status, approval_status, reason
+           FROM attendance_records
+           WHERE user_id = $1 AND rehearsal_id = ANY($2)`,
+            [req.user.id, ids]
+          )
+        ).rows
+      : [];
+    const byRehearsal = new Map(mine.map(({ rehearsal_id, ...rest }) => [rehearsal_id, rest]));
 
-  res.json({ rehearsals: enriched });
-});
+    const enriched = rehearsals.map((r) => ({ ...r, my_attendance: byRehearsal.get(r.id) || null }));
+
+    res.json({ rehearsals: enriched });
+  })
+);
 
 // GET /rehearsals/:id - single rehearsal with full attendance roster
-router.get('/:id', (req, res) => {
-  const rehearsal = db.prepare('SELECT * FROM rehearsals WHERE id = ?').get(req.params.id);
-  if (!rehearsal) return res.status(404).json({ error: 'Rehearsal not found' });
+router.get(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    const { rows: rehearsalRows } = await query('SELECT * FROM rehearsals WHERE id = $1', [
+      req.params.id,
+    ]);
+    const rehearsal = rehearsalRows[0];
+    if (!rehearsal) return res.status(404).json({ error: 'Rehearsal not found' });
 
-  const attendance = db.prepare(`
+    const { rows: attendance } = await query(
+      `
     SELECT a.id, a.status, a.absent_start_time, a.absent_end_time, a.reason,
            a.approval_status, a.reviewed_by, a.reviewed_at, a.created_at,
            u.id as user_id, u.name, u.voice_part
     FROM attendance_records a
     JOIN users u ON u.id = a.user_id
-    WHERE a.rehearsal_id = ?
+    WHERE a.rehearsal_id = $1
     ORDER BY u.name ASC
-  `).all(req.params.id);
+  `,
+      [req.params.id]
+    );
 
-  const canViewReasons = req.user.role === 'music_director' || req.user.role === 'president';
-  const filtered = attendance.map((a) => ({
-    ...a,
-    reason: (a.user_id === req.user.id || canViewReasons) ? a.reason : null,
-  }));
+    const canViewReasons = req.user.role === 'music_director' || req.user.role === 'president';
+    const filtered = attendance.map((a) => ({
+      ...a,
+      reason: a.user_id === req.user.id || canViewReasons ? a.reason : null,
+    }));
 
-  res.json({ rehearsal, attendance: filtered });
-});
+    res.json({ rehearsal, attendance: filtered });
+  })
+);
 
 const rehearsalSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be in YYYY-MM-DD format'),
@@ -108,141 +129,178 @@ function generateRecurrenceDates(startDate, daysOfWeek, until, occurrences) {
   return dates;
 }
 
-function insertRehearsalWithAttendance(insertStmt, insertAttendanceStmt, fields, memberIds) {
-  const id = randomUUID();
-  insertStmt.run(
-    id,
-    fields.date,
-    fields.startTime,
-    fields.endTime || null,
-    fields.location,
-    fields.notes || null,
-    fields.recurrenceId || null,
-    fields.createdBy
-  );
-  for (const memberId of memberIds) {
-    insertAttendanceStmt.run(randomUUID(), id, memberId);
-  }
-  return id;
-}
-
 // POST /rehearsals - music director only
-router.post('/', requireMusicDirector, (req, res) => {
-  const parsed = rehearsalSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: parsed.error.issues[0].message });
-  }
-  const { date, startTime, endTime, location, notes, recurrence } = parsed.data;
+router.post(
+  '/',
+  requireMusicDirector,
+  asyncHandler(async (req, res) => {
+    const parsed = rehearsalSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0].message });
+    }
+    const { date, startTime, endTime, location, notes, recurrence } = parsed.data;
 
-  const insertRehearsal = db.prepare(`
-    INSERT INTO rehearsals (id, date, start_time, end_time, location, notes, recurrence_id, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  const insertAttendance = db.prepare(`
-    INSERT INTO attendance_records (id, rehearsal_id, user_id) VALUES (?, ?, ?)
-  `);
-
-  const createWithAttendance = db.transaction((dates, recurrenceId) => {
-    const memberIds = db.prepare('SELECT id FROM users').all().map((u) => u.id);
-    const ids = [];
-    for (const d of dates) {
-      const id = insertRehearsalWithAttendance(
-        insertRehearsal,
-        insertAttendance,
-        { date: d, startTime, endTime, location, notes, recurrenceId, createdBy: req.user.id },
-        memberIds
+    let dates = [date];
+    let recurrenceId = null;
+    if (recurrence) {
+      dates = generateRecurrenceDates(
+        date,
+        recurrence.daysOfWeek,
+        recurrence.until,
+        recurrence.occurrences
       );
-      ids.push(id);
+      if (dates.length === 0) {
+        return res.status(400).json({ error: 'Recurrence produced no rehearsal dates' });
+      }
+      recurrenceId = randomUUID();
     }
-    return ids;
-  });
 
-  let ids;
-  if (recurrence) {
-    const dates = generateRecurrenceDates(date, recurrence.daysOfWeek, recurrence.until, recurrence.occurrences);
-    if (dates.length === 0) {
-      return res.status(400).json({ error: 'Recurrence produced no rehearsal dates' });
-    }
-    ids = createWithAttendance(dates, randomUUID());
-  } else {
-    ids = createWithAttendance([date], null);
-  }
+    // A long recurrence can be 100+ rehearsals x every member; batch the writes so
+    // this stays a handful of round trips rather than one per row.
+    const ids = await withTransaction(async (client) => {
+      const { rows: members } = await client.query('SELECT id FROM users');
+      const memberIds = members.map((m) => m.id);
 
-  const rehearsals = db
-    .prepare(`SELECT * FROM rehearsals WHERE id IN (${ids.map(() => '?').join(',')})`)
-    .all(...ids);
-  res.status(201).json({ rehearsals });
-});
+      const rehearsalIds = dates.map(() => randomUUID());
+
+      const rehearsalParams = [];
+      const rehearsalTuples = dates.map((d, i) => {
+        rehearsalParams.push(
+          rehearsalIds[i],
+          d,
+          startTime,
+          endTime || null,
+          location,
+          notes || null,
+          recurrenceId,
+          req.user.id
+        );
+        const base = rehearsalParams.length - 8;
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8})`;
+      });
+
+      await client.query(
+        `INSERT INTO rehearsals (id, date, start_time, end_time, location, notes, recurrence_id, created_by)
+         VALUES ${rehearsalTuples.join(', ')}`,
+        rehearsalParams
+      );
+
+      if (memberIds.length) {
+        const attendanceParams = [];
+        const attendanceTuples = [];
+        for (const rehearsalId of rehearsalIds) {
+          for (const memberId of memberIds) {
+            attendanceParams.push(randomUUID(), rehearsalId, memberId);
+            const base = attendanceParams.length - 3;
+            attendanceTuples.push(`($${base + 1}, $${base + 2}, $${base + 3})`);
+          }
+        }
+        await client.query(
+          `INSERT INTO attendance_records (id, rehearsal_id, user_id) VALUES ${attendanceTuples.join(', ')}`,
+          attendanceParams
+        );
+      }
+
+      return rehearsalIds;
+    });
+
+    const { rows: rehearsals } = await query(
+      'SELECT * FROM rehearsals WHERE id = ANY($1) ORDER BY date ASC',
+      [ids]
+    );
+    res.status(201).json({ rehearsals });
+  })
+);
 
 const rehearsalUpdateSchema = rehearsalSchema.omit({ recurrence: true }).partial();
 
 // PUT /rehearsals/:id - music director only; ?scope=series applies startTime/endTime/location/notes to the whole recurring series
-router.put('/:id', requireMusicDirector, (req, res) => {
-  const existing = db.prepare('SELECT id, recurrence_id FROM rehearsals WHERE id = ?').get(req.params.id);
-  if (!existing) return res.status(404).json({ error: 'Rehearsal not found' });
-
-  const parsed = rehearsalUpdateSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: parsed.error.issues[0].message });
-  }
-  const fields = parsed.data;
-  const scope = req.query.scope === 'series' ? 'series' : 'instance';
-
-  const columnMap = { startTime: 'start_time', endTime: 'end_time' };
-  let updateFields = fields;
-  if (scope === 'series') {
-    if (!existing.recurrence_id) {
-      return res.status(400).json({ error: 'This rehearsal is not part of a recurring series' });
-    }
-    // Only time/location/notes propagate across the series; each instance keeps its own date.
-    const { date: _date, ...seriesFields } = fields;
-    updateFields = seriesFields;
-  }
-
-  const setClauses = [];
-  const params = [];
-  for (const [key, value] of Object.entries(updateFields)) {
-    const column = columnMap[key] || key;
-    setClauses.push(`${column} = ?`);
-    params.push(value);
-  }
-  if (setClauses.length === 0) {
-    return res.status(400).json({ error: 'No fields to update' });
-  }
-
-  if (scope === 'series') {
-    db.prepare(`UPDATE rehearsals SET ${setClauses.join(', ')} WHERE recurrence_id = ?`).run(
-      ...params,
-      existing.recurrence_id
+router.put(
+  '/:id',
+  requireMusicDirector,
+  asyncHandler(async (req, res) => {
+    const { rows: existingRows } = await query(
+      'SELECT id, recurrence_id FROM rehearsals WHERE id = $1',
+      [req.params.id]
     );
-    const rehearsals = db
-      .prepare('SELECT * FROM rehearsals WHERE recurrence_id = ? ORDER BY date ASC')
-      .all(existing.recurrence_id);
-    return res.json({ rehearsals });
-  }
+    const existing = existingRows[0];
+    if (!existing) return res.status(404).json({ error: 'Rehearsal not found' });
 
-  params.push(req.params.id);
-  db.prepare(`UPDATE rehearsals SET ${setClauses.join(', ')} WHERE id = ?`).run(...params);
-  const rehearsal = db.prepare('SELECT * FROM rehearsals WHERE id = ?').get(req.params.id);
-  res.json({ rehearsal });
-});
+    const parsed = rehearsalUpdateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0].message });
+    }
+    const fields = parsed.data;
+    const scope = req.query.scope === 'series' ? 'series' : 'instance';
+
+    const columnMap = { startTime: 'start_time', endTime: 'end_time' };
+    let updateFields = fields;
+    if (scope === 'series') {
+      if (!existing.recurrence_id) {
+        return res.status(400).json({ error: 'This rehearsal is not part of a recurring series' });
+      }
+      // Only time/location/notes propagate across the series; each instance keeps its own date.
+      const { date: _date, ...seriesFields } = fields;
+      updateFields = seriesFields;
+    }
+
+    const setClauses = [];
+    const params = [];
+    for (const [key, value] of Object.entries(updateFields)) {
+      const column = columnMap[key] || key;
+      params.push(value);
+      setClauses.push(`${column} = $${params.length}`);
+    }
+    if (setClauses.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    if (scope === 'series') {
+      params.push(existing.recurrence_id);
+      await query(
+        `UPDATE rehearsals SET ${setClauses.join(', ')} WHERE recurrence_id = $${params.length}`,
+        params
+      );
+      const { rows: rehearsals } = await query(
+        'SELECT * FROM rehearsals WHERE recurrence_id = $1 ORDER BY date ASC',
+        [existing.recurrence_id]
+      );
+      return res.json({ rehearsals });
+    }
+
+    params.push(req.params.id);
+    const { rows } = await query(
+      `UPDATE rehearsals SET ${setClauses.join(', ')} WHERE id = $${params.length} RETURNING *`,
+      params
+    );
+    res.json({ rehearsal: rows[0] });
+  })
+);
 
 // DELETE /rehearsals/:id - music director only; ?scope=series deletes every rehearsal in the recurring series
-router.delete('/:id', requireMusicDirector, (req, res) => {
-  const existing = db.prepare('SELECT id, recurrence_id FROM rehearsals WHERE id = ?').get(req.params.id);
-  if (!existing) return res.status(404).json({ error: 'Rehearsal not found' });
+router.delete(
+  '/:id',
+  requireMusicDirector,
+  asyncHandler(async (req, res) => {
+    const { rows: existingRows } = await query(
+      'SELECT id, recurrence_id FROM rehearsals WHERE id = $1',
+      [req.params.id]
+    );
+    const existing = existingRows[0];
+    if (!existing) return res.status(404).json({ error: 'Rehearsal not found' });
 
-  const scope = req.query.scope === 'series' ? 'series' : 'instance';
-  if (scope === 'series') {
-    if (!existing.recurrence_id) {
-      return res.status(400).json({ error: 'This rehearsal is not part of a recurring series' });
+    const scope = req.query.scope === 'series' ? 'series' : 'instance';
+    if (scope === 'series') {
+      if (!existing.recurrence_id) {
+        return res.status(400).json({ error: 'This rehearsal is not part of a recurring series' });
+      }
+      await query('DELETE FROM rehearsals WHERE recurrence_id = $1', [existing.recurrence_id]);
+      return res.status(204).send();
     }
-    db.prepare('DELETE FROM rehearsals WHERE recurrence_id = ?').run(existing.recurrence_id);
-    return res.status(204).send();
-  }
 
-  db.prepare('DELETE FROM rehearsals WHERE id = ?').run(req.params.id);
-  res.status(204).send();
-});
+    await query('DELETE FROM rehearsals WHERE id = $1', [req.params.id]);
+    res.status(204).send();
+  })
+);
 
 export default router;
