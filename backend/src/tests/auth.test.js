@@ -1,30 +1,27 @@
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const testDbPath = path.join(__dirname, 'test-auth.db');
-
-// Point the db module at a throwaway file BEFORE anything imports it
-process.env.DB_PATH = testDbPath;
+// Each test file gets its own schema BEFORE anything imports the db module, so
+// `node --test` can run the files in parallel against one database.
+process.env.PG_SCHEMA = 'test_auth';
+process.env.DATABASE_URL ||= 'postgresql://localhost:5432/acappella_test';
 
 const { createApp } = await import('../app.js');
-const db = (await import('../db/index.js')).default;
+const { initDb, truncateAll, closeDb } = await import('../db/index.js');
 const request = (await import('supertest')).default;
 
 const app = createApp();
 
-beforeEach(() => {
-  db.exec('DELETE FROM attendance_records; DELETE FROM rehearsals; DELETE FROM users;');
+before(async () => {
+  await initDb();
 });
 
-after(() => {
-  db.close();
-  for (const ext of ['', '-wal', '-shm']) {
-    if (fs.existsSync(testDbPath + ext)) fs.unlinkSync(testDbPath + ext);
-  }
+beforeEach(async () => {
+  await truncateAll();
+});
+
+after(async () => {
+  await closeDb();
 });
 
 test('POST /api/auth/register requires a valid organization role', async () => {
